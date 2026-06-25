@@ -15,6 +15,7 @@ from app.db.models import (
     VintedListing,
 )
 from app.services.ai_matcher import AIMatcher
+from app.services.deal_engine import is_deal
 from app.services.ebay_comparator import EbayComparator
 from app.services.gemini_client import GeminiClient, GeminiConfigurationError
 from app.services.telegram_notifier import TelegramNotifier
@@ -76,12 +77,24 @@ class ScanOrchestrator:
                 .all()
             )
 
+            failed_searches = 0
             for search in searches:
                 processed += 1
-                deals_found += self._process_search(search)
+                try:
+                    deals_found += self._process_search(search)
+                except Exception:  # noqa: BLE001 - isolate one search's failure
+                    self.db.rollback()
+                    failed_searches += 1
+                    logger.exception("Failed to process search id=%s", search.id)
 
             job.status = "success"
-            job.details = json.dumps({"searches_processed": processed, "deals_found": deals_found})
+            job.details = json.dumps(
+                {
+                    "searches_processed": processed,
+                    "deals_found": deals_found,
+                    "failed_searches": failed_searches,
+                }
+            )
         except Exception as exc:  # noqa: BLE001 - job failure capture
             logger.exception("Scan failed")
             job.status = "failed"
@@ -100,24 +113,58 @@ class ScanOrchestrator:
             max_price=search.max_price,
         )
 
+        # Persist tracking first and commit, so the dashboard reflects monitoring
+        # activity even if the benchmark or AI matching steps below fail.
+        listing_models = [self._upsert_listing(search, data) for data in listings]
+        self.db.commit()
+
         benchmark = self.ebay_comparator.fetch_benchmark(search.query, search.brand)
         if benchmark is None:
+            logger.info(
+                "No eBay benchmark for search id=%s; tracked %s listings without deal evaluation",
+                search.id,
+                len(listing_models),
+            )
             return 0
 
-        for listing_data in listings:
-            listing = self._upsert_listing(search, listing_data)
+        # Gate on the free price check first, then evaluate only the cheapest
+        # candidates with the (slow, paid) AI matcher up to a hard cap.
+        candidates = []
+        for listing in listing_models:
             self._save_benchmark(listing, benchmark)
-
-            is_deal, discount_percent, confidence, _ = self.ai_matcher.evaluate(
-                vinted_title=listing.title,
+            price_deal, _ = is_deal(
                 vinted_price=listing.price,
-                vinted_condition=listing.condition,
                 benchmark_price=benchmark.median_price,
                 discount_threshold_percent=search.discount_threshold_percent,
-                ebay_titles=benchmark.titles,
+            )
+            if price_deal:
+                candidates.append(listing)
+
+        candidates.sort(key=lambda item: item.price)
+        capped = candidates[: self.settings.max_ai_evaluations_per_search]
+        if len(candidates) > len(capped):
+            logger.info(
+                "search id=%s: %s price candidates, evaluating cheapest %s with AI",
+                search.id,
+                len(candidates),
+                len(capped),
             )
 
-            if not is_deal:
+        for listing in capped:
+            try:
+                is_match, discount_percent, confidence, _ = self.ai_matcher.evaluate(
+                    vinted_title=listing.title,
+                    vinted_price=listing.price,
+                    vinted_condition=listing.condition,
+                    benchmark_price=benchmark.median_price,
+                    discount_threshold_percent=search.discount_threshold_percent,
+                    ebay_titles=benchmark.titles,
+                )
+            except Exception:  # noqa: BLE001 - isolate per-listing AI failures
+                logger.exception("AI evaluation failed for listing id=%s", listing.id)
+                continue
+
+            if not is_match:
                 continue
 
             existing = (

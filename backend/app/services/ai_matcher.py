@@ -18,21 +18,27 @@ class AIMatcher:
         discount_threshold_percent: float,
         ebay_titles: list[str],
     ) -> tuple[bool, float, float, MatchResult]:
-        match_result = self.gemini_client.match_listings(
-            vinted_title=vinted_title,
-            vinted_condition=vinted_condition,
-            ebay_titles=ebay_titles,
-        )
-
         deal, discount_percent = is_deal(
             vinted_price=vinted_price,
             benchmark_price=benchmark_price,
             discount_threshold_percent=discount_threshold_percent,
         )
 
-        is_valid = (
-            deal
-            and match_result.is_match
-            and match_result.confidence >= self.min_confidence
+        # Only spend a Gemini call on listings cheap enough to be a candidate deal;
+        # the price gate is free and filters out the vast majority of listings.
+        if not deal:
+            return False, discount_percent, 0.0, MatchResult(
+                is_match=False,
+                confidence=0.0,
+                normalized_title="",
+                reasoning="price above discount threshold",
+            )
+
+        match_result = self.gemini_client.match_listings(
+            vinted_title=vinted_title,
+            vinted_condition=vinted_condition,
+            ebay_titles=ebay_titles,
         )
+
+        is_valid = match_result.is_match and match_result.confidence >= self.min_confidence
         return is_valid, discount_percent, match_result.confidence, match_result

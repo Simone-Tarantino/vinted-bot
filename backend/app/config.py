@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_MODEL")
+    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
 
     database_url: str = Field(
         default="sqlite:///./vinted_bot.db",
@@ -30,6 +30,9 @@ class Settings(BaseSettings):
 
     scan_interval_minutes: int = Field(default=15, alias="SCAN_INTERVAL_MINUTES")
     notification_cooldown_hours: int = Field(default=24, alias="NOTIFICATION_COOLDOWN_HOURS")
+    max_ai_evaluations_per_search: int = Field(
+        default=25, alias="MAX_AI_EVALUATIONS_PER_SEARCH"
+    )
 
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
     api_port: int = Field(default=8000, alias="API_PORT")

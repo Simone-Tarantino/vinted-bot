@@ -1,14 +1,32 @@
 import base64
+import html
 import json
-import os
+import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 from playwright.sync_api import Browser, Page, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+logger = logging.getLogger(__name__)
+
+# Flags required so Chromium runs reliably inside small/locked-down containers
+# (e.g. DigitalOcean App Platform): no sandbox and no reliance on the tiny
+# default /dev/shm, which otherwise makes the browser crash mid-scan.
+CHROMIUM_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-setuid-sandbox",
+]
+
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 @dataclass
@@ -48,6 +66,56 @@ class VintedSessionStore:
             return None
 
 
+def parse_price(text: str) -> Optional[float]:
+    """Parse a price from a free-form string, handling IT/EN decimal formats.
+
+    Examples: "€30.00" -> 30.0, "EUR 1.234,56" -> 1234.56, "19,90 €" -> 19.9.
+    """
+    match = re.search(r"\d[\d.,]*", text)
+    if not match:
+        return None
+
+    # Drop any separator the greedy match grabbed before/after the digits
+    # (e.g. a trailing comma from "€19.00, €20.65").
+    raw = match.group(0).strip(".,")
+    if "," in raw and "." in raw:
+        # The right-most separator is the decimal one.
+        if raw.rfind(",") > raw.rfind("."):
+            raw = raw.replace(".", "").replace(",", ".")
+        else:
+            raw = raw.replace(",", "")
+    elif "," in raw:
+        # Comma is a decimal separator only when followed by 1-2 digits.
+        raw = raw.replace(",", ".") if re.search(r",\d{1,2}$", raw) else raw.replace(",", "")
+
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def parse_listing_title(title_attr: str) -> tuple[str, Optional[str], Optional[str], Optional[float]]:
+    """Parse Vinted's accessible ``title`` attribute into structured fields.
+
+    Format: ``"<title>, brand: <brand>, condizioni: <condition>, €<price>, ..."``.
+    """
+    text = html.unescape(title_attr).strip()
+
+    brand_match = re.search(r",\s*brand:\s*(.+?)\s*,\s*(?:condizion|tagli|€|$)", text, re.IGNORECASE)
+    cond_match = re.search(r"condizion[ei]:\s*(.+?)\s*,\s*€", text, re.IGNORECASE)
+    price_match = re.search(r"€\s*([\d.,]+)", text)
+
+    if ", brand:" in text:
+        listing_title = text.split(", brand:", 1)[0].strip()
+    else:
+        listing_title = re.split(r",?\s*€", text, 1)[0].strip()
+
+    brand = brand_match.group(1).strip() if brand_match else None
+    condition = cond_match.group(1).strip() if cond_match else None
+    price = parse_price(price_match.group(1)) if price_match else None
+    return listing_title, brand, condition, price
+
+
 class VintedWorker:
     BASE_URL = "https://www.vinted.it"
 
@@ -65,38 +133,47 @@ class VintedWorker:
         params = f"search_text={search_text.replace(' ', '%20')}"
         if max_price:
             params += f"&price_to={int(max_price)}"
+        params += "&order=newest_first"
         return f"{self.BASE_URL}/catalog?{params}"
 
-    def parse_listings_from_html(self, html: str) -> list[VintedListingData]:
-        pattern = re.compile(
-            r'href="(/items/\d+[^"]*)"[^>]*>.*?'
-            r'class="[^"]*web_ui__Text__text[^"]*"[^>]*>([^<]+)</p>.*?'
-            r'class="[^"]*web_ui__Text__text[^"]*"[^>]*>([\d.,]+)\s*€',
-            re.DOTALL,
+    def parse_listings_from_html(self, html_content: str) -> list[VintedListingData]:
+        """Extract listings from a rendered catalog page.
+
+        Each product card is an ``<a>`` linking to ``/items/<id>`` whose ``title``
+        attribute carries title/brand/condition/price as accessible text.
+        """
+        anchor_pattern = re.compile(
+            r'<a\b([^>]*\bhref="[^"]*?/items/\d+[^"]*"[^>]*)>',
+            re.IGNORECASE,
         )
 
         listings: list[VintedListingData] = []
         seen_ids: set[str] = set()
 
-        for relative_url, title, raw_price in pattern.findall(html):
-            item_id_match = re.search(r"/items/(\d+)", relative_url)
-            if not item_id_match:
+        for attrs in anchor_pattern.findall(html_content):
+            href_match = re.search(r'href="([^"]*?/items/(\d+)[^"]*)"', attrs)
+            title_match = re.search(r'title="([^"]*)"', attrs)
+            if not href_match or not title_match:
                 continue
 
-            item_id = item_id_match.group(1)
+            item_id = href_match.group(2)
             if item_id in seen_ids:
+                continue
+
+            listing_title, brand, condition, price = parse_listing_title(title_match.group(1))
+            if price is None:
                 continue
             seen_ids.add(item_id)
 
-            price = float(raw_price.replace(",", "."))
-            url = f"{self.BASE_URL}{relative_url.split('?')[0]}"
+            href = href_match.group(1).split("?")[0]
+            url = href if href.startswith("http") else f"{self.BASE_URL}{href}"
             listings.append(
                 VintedListingData(
                     vinted_item_id=item_id,
-                    title=title.strip(),
+                    title=listing_title or title_match.group(1),
                     price=price,
                     currency="EUR",
-                    condition=None,
+                    condition=condition,
                     url=url,
                     image_url=None,
                 )
@@ -104,8 +181,14 @@ class VintedWorker:
 
         return listings
 
-    def _apply_cookies(self, page: Page, cookies: list[dict[str, Any]]) -> None:
-        page.context.add_cookies(cookies)
+    @staticmethod
+    def _dismiss_consent(page: Page) -> None:
+        try:
+            page.click("#onetrust-accept-btn-handler", timeout=3000)
+        except PlaywrightTimeoutError:
+            pass
+        except Exception:  # noqa: BLE001 - consent banner is best-effort
+            pass
 
     def search(
         self,
@@ -121,22 +204,31 @@ class VintedWorker:
         cookies = self.session_store.load_cookies()
 
         with sync_playwright() as playwright:
-            browser: Browser = playwright.chromium.launch(headless=self.headless)
-            context = browser.new_context()
-            page = context.new_page()
+            browser: Browser = playwright.chromium.launch(
+                headless=self.headless, args=CHROMIUM_ARGS
+            )
+            context = browser.new_context(locale="it-IT", user_agent=USER_AGENT)
+            try:
+                if cookies:
+                    context.add_cookies(cookies)
 
-            if cookies:
-                self._apply_cookies(page, cookies)
+                page = context.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                self._dismiss_consent(page)
 
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            html = page.content()
+                try:
+                    page.wait_for_selector('a[href*="/items/"]', timeout=20000)
+                except PlaywrightTimeoutError:
+                    logger.warning("No Vinted items rendered for query=%r", query)
 
-            if cookies:
-                self.session_store.save_cookies(context.cookies())
+                html_content = page.content()
 
-            browser.close()
+                if cookies:
+                    self.session_store.save_cookies(context.cookies())
+            finally:
+                browser.close()
 
-        return self.parse_listings_from_html(html)
+        return self.parse_listings_from_html(html_content)
 
     def import_session_cookies(self, cookies: list[dict[str, Any]]) -> None:
         self.session_store.save_cookies(cookies)

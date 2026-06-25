@@ -1,11 +1,25 @@
-import re
+import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import quote_plus
 
-import httpx
-
 from app.services.deal_engine import compute_robust_median
+from app.services.vinted_worker import CHROMIUM_ARGS, USER_AGENT, parse_price
+
+logger = logging.getLogger(__name__)
+
+# Structured entries extracted from the rendered eBay results page.
+_EBAY_EXTRACT_JS = r"""
+() => {
+  const out = [];
+  document.querySelectorAll('ul.srp-results > li.s-card, li.s-item').forEach(li => {
+    const t = (li.querySelector('.s-card__title, .s-item__title') || {}).innerText || '';
+    const p = (li.querySelector('.s-card__price, .s-item__price') || {}).innerText || '';
+    if (t && p) out.push({ title: t.trim(), price: p.trim() });
+  });
+  return out;
+}
+"""
 
 
 @dataclass
@@ -24,10 +38,17 @@ class EbayBenchmark:
 
 
 class EbayComparator:
+    EBAY_BASE = "https://www.ebay.it"
     EBAY_SOLD_URL = "https://www.ebay.it/sch/i.html"
 
-    def __init__(self, client: Optional[httpx.Client] = None):
-        self._client = client or httpx.Client(timeout=30.0, follow_redirects=True)
+    def __init__(
+        self,
+        headless: bool = True,
+        fetch_fn: Optional[Callable[[str], list[dict]]] = None,
+    ):
+        self._headless = headless
+        # Injectable for tests; otherwise a Playwright browser fetch is used.
+        self._fetch_fn = fetch_fn
 
     def build_search_url(self, query: str, brand: Optional[str] = None) -> str:
         keywords = " ".join(part for part in [brand, query] if part)
@@ -36,38 +57,50 @@ class EbayComparator:
             "&LH_Complete=1&LH_Sold=1&_sop=13"
         )
 
-    def parse_prices_from_html(self, html: str) -> list[EbaySoldItem]:
-        price_pattern = re.compile(
-            r's-item__title[^>]*>([^<]+)</span>.*?s-item__price[^>]*>([^<]+)</span>',
-            re.DOTALL,
-        )
+    def parse_entries(self, entries: list[dict]) -> list[EbaySoldItem]:
         items: list[EbaySoldItem] = []
-
-        for title, raw_price in price_pattern.findall(html):
-            title = re.sub(r"\s+", " ", title).strip()
+        for entry in entries:
+            title = " ".join((entry.get("title") or "").split())
             if not title or title.lower().startswith("shop on ebay"):
                 continue
-
-            price_match = re.search(r"([\d.,]+)", raw_price.replace("\xa0", " "))
-            if not price_match:
+            price = parse_price(entry.get("price") or "")
+            if price is None or price <= 0:
                 continue
-
-            price_text = price_match.group(1).replace(".", "").replace(",", ".")
-            try:
-                price = float(price_text)
-            except ValueError:
-                continue
-
             items.append(EbaySoldItem(title=title, price=price, currency="EUR"))
-
         return items
+
+    def _fetch_entries(self, url: str) -> list[dict]:
+        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=self._headless, args=CHROMIUM_ARGS)
+            context = browser.new_context(locale="it-IT", user_agent=USER_AGENT)
+            try:
+                page = context.new_page()
+                # Warm up cookies on the homepage first; hitting the search URL
+                # cold gets a 403 from eBay's edge protection.
+                page.goto(self.EBAY_BASE, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(1200)
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                try:
+                    page.wait_for_selector("ul.srp-results li", timeout=15000)
+                except PlaywrightTimeoutError:
+                    logger.warning("No eBay sold results rendered for %s", url)
+                return page.evaluate(_EBAY_EXTRACT_JS)
+            finally:
+                browser.close()
 
     def fetch_benchmark(self, query: str, brand: Optional[str] = None) -> Optional[EbayBenchmark]:
         url = self.build_search_url(query, brand)
-        response = self._client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        response.raise_for_status()
+        fetch = self._fetch_fn or self._fetch_entries
+        try:
+            entries = fetch(url)
+        except Exception as exc:  # noqa: BLE001 - benchmark is best-effort, never fatal
+            logger.warning("eBay benchmark fetch failed for query=%r: %s", query, exc)
+            return None
 
-        sold_items = self.parse_prices_from_html(response.text)
+        sold_items = self.parse_entries(entries)
         prices = [item.price for item in sold_items]
         median, sample_count = compute_robust_median(prices)
 
