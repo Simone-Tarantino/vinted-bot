@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -69,6 +69,9 @@ class JobScheduler:
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+            # Run one scan shortly after startup instead of waiting a full
+            # interval, so fresh data appears right after a deploy/restart.
+            next_run_time=datetime.utcnow() + timedelta(seconds=10),
         )
         self.scheduler.start()
         logger.info(
