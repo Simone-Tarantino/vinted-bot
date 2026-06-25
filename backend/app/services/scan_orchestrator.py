@@ -1,5 +1,6 @@
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
@@ -12,20 +13,17 @@ from app.db.models import (
     MonitoredSearch,
     NotificationLog,
     PriceBenchmark,
+    ProductSignature,
     VintedListing,
 )
-from app.services.ai_matcher import AIMatcher
-from app.services.deal_engine import is_deal
-from app.services.ebay_comparator import EbayComparator
+from app.services.deal_engine import compute_robust_median, is_deal
 from app.services.gemini_client import GeminiClient, GeminiConfigurationError
 from app.services.telegram_notifier import TelegramNotifier
-from app.services.vinted_worker import (
-    VintedSessionStore,
-    VintedWorker,
-    build_vinted_benchmark,
-)
+from app.services.vinted_worker import VintedListingData, VintedSessionStore, VintedWorker
 
 logger = logging.getLogger(__name__)
+
+SIGNATURE_BATCH_SIZE = 50
 
 
 class ScanOrchestrator:
@@ -34,8 +32,7 @@ class ScanOrchestrator:
         db: Session,
         settings: Optional[Settings] = None,
         vinted_worker: Optional[VintedWorker] = None,
-        ebay_comparator: Optional[EbayComparator] = None,
-        ai_matcher: Optional[AIMatcher] = None,
+        signature_classifier: Optional[GeminiClient] = None,
         telegram_notifier: Optional[TelegramNotifier] = None,
     ):
         self.db = db
@@ -46,18 +43,12 @@ class ScanOrchestrator:
             session_file=self.settings.vinted_session_file,
         )
         self.vinted_worker = vinted_worker or VintedWorker(session_store=session_store)
-        self.ebay_comparator = ebay_comparator or EbayComparator(
-            enabled=self.settings.ebay_benchmark_enabled
-        )
 
-        if ai_matcher is not None:
-            self.ai_matcher = ai_matcher
-        else:
-            gemini = GeminiClient(
-                api_key=self.settings.gemini_api_key,
-                model_name=self.settings.gemini_model,
-            )
-            self.ai_matcher = AIMatcher(gemini_client=gemini)
+        # Cheap model: product-signature classification is the only AI step.
+        self.signature_classifier = signature_classifier or GeminiClient(
+            api_key=self.settings.gemini_api_key,
+            model_name=self.settings.gemini_signature_model,
+        )
 
         self.telegram_notifier = telegram_notifier or TelegramNotifier(
             bot_token=self.settings.telegram_bot_token,
@@ -121,70 +112,56 @@ class ScanOrchestrator:
         )
 
         # Persist tracking first and commit, so the dashboard reflects monitoring
-        # activity even if the benchmark or AI matching steps below fail.
+        # activity even if the benchmark/AI steps below fail.
         listing_models = [self._upsert_listing(search, data) for data in listings]
         self.db.commit()
 
-        # Prefer an external eBay benchmark when enabled; otherwise use the robust
-        # median of comparable Vinted asking prices (free, no browser). The Vinted
-        # benchmark uses an unfiltered fetch so the median reflects the whole
-        # market, not just the cheap end the user filters to.
-        benchmark = self.ebay_comparator.fetch_benchmark(search.query, search.brand)
-        if benchmark is None:
-            broad_listings = (
-                self.vinted_worker.search(query=search.query, brand=search.brand)
-                if search.max_price is not None
-                else listings
-            )
-            benchmark = build_vinted_benchmark(broad_listings)
+        # Benchmark population: the full (unfiltered) result set, so per-product
+        # medians reflect the whole market, not just the cheap end the user filters.
+        broad = (
+            self.vinted_worker.search(query=search.query, brand=search.brand)
+            if search.max_price is not None
+            else listings
+        )
+        population: dict[str, VintedListingData] = {}
+        for data in list(broad) + list(listings):
+            population.setdefault(data.vinted_item_id, data)
 
-        if benchmark is None:
-            logger.info(
-                "No benchmark for search id=%s; tracked %s listings without deal evaluation",
-                search.id,
-                len(listing_models),
-            )
-            return 0
+        # Assign each item a canonical product signature (cached across scans).
+        signatures = self._signatures_for(list(population.values()))
 
-        # Gate on the free price check first, then evaluate only the cheapest
-        # candidates with the (slow, paid) AI matcher up to a hard cap.
-        candidates = []
+        # Robust median price per real-product signature.
+        prices_by_signature: dict[str, list[float]] = defaultdict(list)
+        for item in population.values():
+            sig = signatures.get(item.vinted_item_id, "other")
+            if sig and sig != "other":
+                prices_by_signature[sig].append(item.price)
+
+        median_by_signature: dict[str, tuple[float, int]] = {}
+        for sig, prices in prices_by_signature.items():
+            median, count = compute_robust_median(
+                prices, min_samples=self.settings.min_benchmark_samples
+            )
+            if median is not None:
+                median_by_signature[sig] = (median, count)
+
+        # A tracked listing is a deal if it sits well below the median of its OWN
+        # product signature (same product+variant).
         for listing in listing_models:
-            self._save_benchmark(listing, benchmark)
-            price_deal, _ = is_deal(
+            sig = signatures.get(listing.vinted_item_id)
+            if not sig or sig == "other" or sig not in median_by_signature:
+                continue
+
+            median, sample_count = median_by_signature[sig]
+            price_deal, discount_percent = is_deal(
                 vinted_price=listing.price,
-                benchmark_price=benchmark.median_price,
+                benchmark_price=median,
                 discount_threshold_percent=search.discount_threshold_percent,
             )
-            if price_deal:
-                candidates.append(listing)
-
-        candidates.sort(key=lambda item: item.price)
-        capped = candidates[: self.settings.max_ai_evaluations_per_search]
-        if len(candidates) > len(capped):
-            logger.info(
-                "search id=%s: %s price candidates, evaluating cheapest %s with AI",
-                search.id,
-                len(candidates),
-                len(capped),
-            )
-
-        for listing in capped:
-            try:
-                is_match, discount_percent, confidence, _ = self.ai_matcher.evaluate(
-                    vinted_title=listing.title,
-                    vinted_price=listing.price,
-                    vinted_condition=listing.condition,
-                    benchmark_price=benchmark.median_price,
-                    discount_threshold_percent=search.discount_threshold_percent,
-                    reference_titles=benchmark.titles,
-                )
-            except Exception:  # noqa: BLE001 - isolate per-listing AI failures
-                logger.exception("AI evaluation failed for listing id=%s", listing.id)
+            if not price_deal:
                 continue
 
-            if not is_match:
-                continue
+            self._save_benchmark(listing, median, sample_count, sig)
 
             existing = (
                 self.db.query(DealSignal)
@@ -197,9 +174,9 @@ class ScanOrchestrator:
             deal = DealSignal(
                 listing_id=listing.id,
                 vinted_price=listing.price,
-                benchmark_price=benchmark.median_price,
+                benchmark_price=median,
                 discount_percent=discount_percent,
-                match_confidence=confidence,
+                match_confidence=1.0,
             )
             self.db.add(deal)
             self.db.flush()
@@ -211,6 +188,46 @@ class ScanOrchestrator:
 
         self.db.commit()
         return deals_found
+
+    def _signatures_for(self, items: list[VintedListingData]) -> dict[str, str]:
+        """Return {vinted_item_id: signature}, classifying only uncached items."""
+        item_ids = [item.vinted_item_id for item in items]
+        cached: dict[str, str] = {
+            row.vinted_item_id: row.signature
+            for row in self.db.query(ProductSignature).filter(
+                ProductSignature.vinted_item_id.in_(item_ids)
+            )
+        }
+
+        missing = [item for item in items if item.vinted_item_id not in cached]
+        if not missing:
+            return cached
+
+        known = sorted({sig for sig in cached.values() if sig != "other"})
+        for start in range(0, len(missing), SIGNATURE_BATCH_SIZE):
+            batch = missing[start : start + SIGNATURE_BATCH_SIZE]
+            try:
+                sigs = self.signature_classifier.classify_signatures(
+                    [item.title for item in batch], known_signatures=known
+                )
+            except Exception:  # noqa: BLE001 - signatures are best-effort
+                logger.exception("Signature classification failed for a batch")
+                sigs = ["other"] * len(batch)
+
+            for item, sig in zip(batch, sigs):
+                cached[item.vinted_item_id] = sig
+                self.db.add(
+                    ProductSignature(
+                        vinted_item_id=item.vinted_item_id,
+                        signature=sig,
+                        title=item.title,
+                    )
+                )
+                if sig != "other" and sig not in known:
+                    known.append(sig)
+
+        self.db.commit()
+        return cached
 
     def _upsert_listing(self, search: MonitoredSearch, listing_data) -> VintedListing:
         listing = (
@@ -244,14 +261,15 @@ class ScanOrchestrator:
         self.db.flush()
         return listing
 
-    def _save_benchmark(self, listing: VintedListing, benchmark) -> None:
-        source = "ebay_sold" if type(benchmark).__name__ == "EbayBenchmark" else "vinted_median"
+    def _save_benchmark(
+        self, listing: VintedListing, median_price: float, sample_count: int, signature: str
+    ) -> None:
         record = PriceBenchmark(
             listing_id=listing.id,
-            source=source,
-            median_price=benchmark.median_price,
-            sample_count=benchmark.sample_count,
-            raw_prices=json.dumps(benchmark.prices),
+            source="vinted_signature",
+            median_price=median_price,
+            sample_count=sample_count,
+            raw_prices=json.dumps({"signature": signature}),
         )
         self.db.add(record)
 

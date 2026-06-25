@@ -113,6 +113,56 @@ class GeminiClient:
         raw = self._call_model(prompt)
         return self._parse_match_result(raw)
 
+    def classify_signatures(
+        self, titles: list[str], known_signatures: Optional[list[str]] = None
+    ) -> list[str]:
+        """Assign each title a canonical product signature so identical
+        products/variants group together. Returns one signature per title,
+        in the same order. Falls back to 'other' on length mismatch.
+        """
+        if not titles:
+            return []
+
+        prompt = (
+            "You normalize second-hand listing titles into canonical product "
+            "signatures so that identical products group together for price "
+            "comparison. A signature is a short lowercase string of the form "
+            "'brand | product line | variant' identifying the exact product AND "
+            "variant (e.g. 'pokemon | primi compagni avventura | serie 1 set completo' "
+            "vs '... | serie 1 busta' vs '... | serie 1 carta singola'). "
+            "Use exactly 'other' for wanted/'cerco' ads, swaps, accessories, empty "
+            "boxes, or lots of mixed/unrelated items. Reuse a known signature "
+            "verbatim whenever it fits instead of inventing a near-duplicate.\n"
+            f"Known signatures: {json.dumps(known_signatures or [], ensure_ascii=False)}\n"
+            f"Titles (in order): {json.dumps(titles, ensure_ascii=False)}\n"
+            "Return ONLY a JSON array of strings, one signature per title, "
+            "exactly same order and length as the titles."
+        )
+        raw = self._call_model(prompt)
+        signatures = self._parse_signature_list(raw)
+        if len(signatures) != len(titles):
+            logger.warning(
+                "Signature count mismatch (%s titles, %s signatures); using 'other'",
+                len(titles),
+                len(signatures),
+            )
+            return ["other"] * len(titles)
+        return [s.strip().lower() or "other" for s in signatures]
+
+    @staticmethod
+    def _parse_signature_list(raw: str) -> list[str]:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise GeminiResponseError("Invalid JSON signature list from Gemini") from exc
+        if not isinstance(payload, list):
+            raise GeminiResponseError("Signature response is not a JSON array")
+        return [str(item) for item in payload]
+
     @staticmethod
     def _parse_match_result(raw: str) -> MatchResult:
         cleaned = raw.strip()

@@ -113,6 +113,24 @@ class JobRun(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
 
+class ProductSignature(Base):
+    """Cache of AI-assigned canonical product signatures, keyed by Vinted item.
+
+    Lets us group listings of the same product/variant for price comparison
+    without re-classifying already-seen items on every scan.
+    """
+
+    __tablename__ = "product_signatures"
+
+    vinted_item_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    signature: Mapped[str] = mapped_column(String(300), nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 def create_db_engine(database_url: str):
     if database_url.startswith("sqlite"):
         connect_args = {"check_same_thread": False}

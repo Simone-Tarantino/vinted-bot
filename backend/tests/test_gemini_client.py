@@ -56,6 +56,26 @@ def test_match_listings_uses_injected_generate_fn():
     assert result.confidence == 0.85
 
 
+def test_classify_signatures_returns_one_per_title():
+    client = GeminiClient(
+        api_key="test-key",
+        generate_fn=lambda _: '["pokemon | x | serie 1", "other"]',
+    )
+    sigs = client.classify_signatures(["Carte serie 1", "Cerco pokemon"])
+    assert sigs == ["pokemon | x | serie 1", "other"]
+
+
+def test_classify_signatures_falls_back_on_length_mismatch():
+    client = GeminiClient(api_key="test-key", generate_fn=lambda _: '["only-one"]')
+    sigs = client.classify_signatures(["a", "b", "c"])
+    assert sigs == ["other", "other", "other"]
+
+
+def test_classify_signatures_empty_input():
+    client = GeminiClient(api_key="test-key", generate_fn=lambda _: "[]")
+    assert client.classify_signatures([]) == []
+
+
 def test_call_model_retries_and_raises():
     attempts = {"count": 0}
 

@@ -9,6 +9,10 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    # Cheaper model for the high-volume product-signature classification step.
+    gemini_signature_model: str = Field(
+        default="gemini-2.5-flash-lite", alias="GEMINI_SIGNATURE_MODEL"
+    )
 
     database_url: str = Field(
         default="sqlite:///./vinted_bot.db",
@@ -33,6 +37,8 @@ class Settings(BaseSettings):
     max_ai_evaluations_per_search: int = Field(
         default=25, alias="MAX_AI_EVALUATIONS_PER_SEARCH"
     )
+    # Minimum same-signature listings required before trusting a price benchmark.
+    min_benchmark_samples: int = Field(default=3, alias="MIN_BENCHMARK_SAMPLES")
     # Off by default: eBay needs Chromium, which crashes on small instances.
     # The benchmark falls back to the median of comparable Vinted prices.
     ebay_benchmark_enabled: bool = Field(default=False, alias="EBAY_BENCHMARK_ENABLED")
