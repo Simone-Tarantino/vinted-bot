@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -25,15 +25,10 @@ class JobScheduler:
         self._scan_runner = scan_runner or self._default_scan_runner
         self.scheduler = BackgroundScheduler()
 
-    def _mark_stale_running_jobs(self, stale_minutes: int = 10) -> int:
+    def _mark_stale_running_jobs(self) -> int:
         db: Session = self.session_factory()
         try:
-            cutoff = datetime.utcnow() - timedelta(minutes=stale_minutes)
-            stale_jobs = (
-                db.query(JobRun)
-                .filter(JobRun.status == "running", JobRun.started_at < cutoff)
-                .all()
-            )
+            stale_jobs = db.query(JobRun).filter(JobRun.status == "running").all()
 
             if not stale_jobs:
                 return 0
