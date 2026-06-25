@@ -39,6 +39,35 @@ class VintedListingData:
     image_url: Optional[str]
 
 
+@dataclass
+class VintedBenchmark:
+    median_price: float
+    sample_count: int
+    prices: list[float]
+    titles: list[str]
+
+
+def build_vinted_benchmark(listings: list["VintedListingData"]) -> Optional[VintedBenchmark]:
+    """Use the robust median of comparable Vinted asking prices as a benchmark.
+
+    A listing priced well below the typical price of its peers for the same
+    search is a candidate deal. Needs no external source or browser.
+    """
+    from app.services.deal_engine import compute_robust_median
+
+    prices = [listing.price for listing in listings]
+    median, sample_count = compute_robust_median(prices)
+    if median is None:
+        return None
+
+    return VintedBenchmark(
+        median_price=median,
+        sample_count=sample_count,
+        prices=sorted(prices)[:30],
+        titles=[listing.title for listing in listings[:30]],
+    )
+
+
 class VintedSessionStore:
     def __init__(self, encryption_key: str, session_file: str):
         self.session_file = Path(session_file)

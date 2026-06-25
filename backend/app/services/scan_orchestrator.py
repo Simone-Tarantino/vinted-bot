@@ -19,7 +19,11 @@ from app.services.deal_engine import is_deal
 from app.services.ebay_comparator import EbayComparator
 from app.services.gemini_client import GeminiClient, GeminiConfigurationError
 from app.services.telegram_notifier import TelegramNotifier
-from app.services.vinted_worker import VintedSessionStore, VintedWorker
+from app.services.vinted_worker import (
+    VintedSessionStore,
+    VintedWorker,
+    build_vinted_benchmark,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +113,7 @@ class ScanOrchestrator:
 
     def _process_search(self, search: MonitoredSearch) -> int:
         deals_found = 0
+        # Listings within the user's max_price: what we track and consider deals.
         listings = self.vinted_worker.search(
             query=search.query,
             brand=search.brand,
@@ -120,10 +125,22 @@ class ScanOrchestrator:
         listing_models = [self._upsert_listing(search, data) for data in listings]
         self.db.commit()
 
+        # Prefer an external eBay benchmark when enabled; otherwise use the robust
+        # median of comparable Vinted asking prices (free, no browser). The Vinted
+        # benchmark uses an unfiltered fetch so the median reflects the whole
+        # market, not just the cheap end the user filters to.
         benchmark = self.ebay_comparator.fetch_benchmark(search.query, search.brand)
         if benchmark is None:
+            broad_listings = (
+                self.vinted_worker.search(query=search.query, brand=search.brand)
+                if search.max_price is not None
+                else listings
+            )
+            benchmark = build_vinted_benchmark(broad_listings)
+
+        if benchmark is None:
             logger.info(
-                "No eBay benchmark for search id=%s; tracked %s listings without deal evaluation",
+                "No benchmark for search id=%s; tracked %s listings without deal evaluation",
                 search.id,
                 len(listing_models),
             )
@@ -160,7 +177,7 @@ class ScanOrchestrator:
                     vinted_condition=listing.condition,
                     benchmark_price=benchmark.median_price,
                     discount_threshold_percent=search.discount_threshold_percent,
-                    ebay_titles=benchmark.titles,
+                    reference_titles=benchmark.titles,
                 )
             except Exception:  # noqa: BLE001 - isolate per-listing AI failures
                 logger.exception("AI evaluation failed for listing id=%s", listing.id)
@@ -228,9 +245,10 @@ class ScanOrchestrator:
         return listing
 
     def _save_benchmark(self, listing: VintedListing, benchmark) -> None:
+        source = "ebay_sold" if type(benchmark).__name__ == "EbayBenchmark" else "vinted_median"
         record = PriceBenchmark(
             listing_id=listing.id,
-            source="ebay_sold",
+            source=source,
             median_price=benchmark.median_price,
             sample_count=benchmark.sample_count,
             raw_prices=json.dumps(benchmark.prices),

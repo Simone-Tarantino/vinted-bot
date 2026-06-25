@@ -99,15 +99,16 @@ class GeminiClient:
         self,
         vinted_title: str,
         vinted_condition: Optional[str],
-        ebay_titles: list[str],
+        reference_titles: list[str],
     ) -> MatchResult:
         prompt = (
             "You compare second-hand product listings. "
             "Return ONLY valid JSON with keys: is_match (bool), confidence (0-1 float), "
             "normalized_title (string), reasoning (short string).\n"
-            f"Vinted listing: title='{vinted_title}', condition='{vinted_condition or 'unknown'}'\n"
-            f"eBay sold titles: {json.dumps(ebay_titles[:10])}\n"
-            "Decide if eBay titles refer to the same product model/variant."
+            f"Candidate listing: title='{vinted_title}', condition='{vinted_condition or 'unknown'}'\n"
+            f"Comparable listing titles: {json.dumps(reference_titles[:10])}\n"
+            "Decide if the candidate is the same product model/variant as the comparable "
+            "listings (not an accessory, empty box, wanted/'cerco' ad, or different set)."
         )
         raw = self._call_model(prompt)
         return self._parse_match_result(raw)

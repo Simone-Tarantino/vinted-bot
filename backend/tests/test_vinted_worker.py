@@ -1,11 +1,38 @@
 from pathlib import Path
 
 from app.services.vinted_worker import (
+    VintedListingData,
     VintedSessionStore,
     VintedWorker,
+    build_vinted_benchmark,
     parse_listing_title,
     parse_price,
 )
+
+
+def _listing(item_id: str, price: float, title: str = "Pokemon serie 1") -> VintedListingData:
+    return VintedListingData(
+        vinted_item_id=item_id,
+        title=title,
+        price=price,
+        currency="EUR",
+        condition=None,
+        url=f"https://www.vinted.it/items/{item_id}",
+        image_url=None,
+    )
+
+
+def test_build_vinted_benchmark_uses_robust_median():
+    listings = [_listing(str(i), price) for i, price in enumerate([10, 12, 14, 16, 18, 20])]
+    benchmark = build_vinted_benchmark(listings)
+    assert benchmark is not None
+    assert benchmark.sample_count == 6
+    assert 14 <= benchmark.median_price <= 16
+    assert len(benchmark.titles) == 6
+
+
+def test_build_vinted_benchmark_none_when_too_few_samples():
+    assert build_vinted_benchmark([_listing("1", 10.0), _listing("2", 12.0)]) is None
 
 
 # Mirrors Vinted's current catalog markup: each card is an <a> to /items/<id>

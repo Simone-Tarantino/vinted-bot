@@ -33,7 +33,9 @@ class Settings(BaseSettings):
     max_ai_evaluations_per_search: int = Field(
         default=25, alias="MAX_AI_EVALUATIONS_PER_SEARCH"
     )
-    ebay_benchmark_enabled: bool = Field(default=True, alias="EBAY_BENCHMARK_ENABLED")
+    # Off by default: eBay needs Chromium, which crashes on small instances.
+    # The benchmark falls back to the median of comparable Vinted prices.
+    ebay_benchmark_enabled: bool = Field(default=False, alias="EBAY_BENCHMARK_ENABLED")
 
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
     api_port: int = Field(default=8000, alias="API_PORT")

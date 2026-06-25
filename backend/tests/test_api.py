@@ -91,7 +91,7 @@ def test_ai_matcher_integration():
         vinted_condition="good",
         benchmark_price=100,
         discount_threshold_percent=20,
-        ebay_titles=["Nike Air Max 90 white"],
+        reference_titles=["Nike Air Max 90 white"],
     )
     assert valid is True
     assert discount == 60.0
