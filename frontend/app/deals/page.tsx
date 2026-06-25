@@ -1,49 +1,52 @@
 import { getDeals } from "@/lib/api";
+import { PageHeader, Card, Badge, EmptyState } from "@/app/components/ui";
+import { formatEuro, formatDateTime } from "@/lib/format";
+
+export const dynamic = "force-dynamic";
 
 export default async function DealsPage() {
   const deals = await getDeals();
 
   return (
-    <div style={{ display: "grid", gap: "1rem" }}>
-      <section>
-        <h1 style={{ marginTop: 0 }}>Deal segnalati</h1>
-        <p style={{ color: "#94a3b8" }}>
-          Offerte Vinted sotto soglia rispetto al benchmark eBay, validate da Gemini.
-        </p>
-      </section>
+    <div className="grid gap-6">
+      <PageHeader
+        title="Deal segnalati"
+        subtitle="Annunci il cui prezzo è sotto la mediana degli annunci dello stesso prodotto (firma prodotto) su Vinted."
+      />
 
       {deals.length === 0 ? (
-        <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 12, padding: "1rem" }}>
-          <p style={{ margin: 0, color: "#94a3b8" }}>Nessun deal ancora rilevato.</p>
-        </div>
+        <EmptyState title="Nessun deal ancora rilevato." hint="Avvia una scansione dalla Dashboard per popolare i risultati." />
       ) : (
-        deals.map((deal) => (
-          <article
-            key={deal.id}
-            style={{
-              background: "#111827",
-              border: "1px solid #1f2937",
-              borderRadius: 12,
-              padding: "1rem",
-            }}
-          >
-            <h2 style={{ margin: "0 0 0.5rem", fontSize: 18 }}>
-              {deal.listing?.title || `Listing #${deal.listing_id}`}
-            </h2>
-            <div style={{ display: "grid", gap: 4, color: "#cbd5e1" }}>
-              <span>Prezzo Vinted: €{deal.vinted_price.toFixed(2)}</span>
-              <span>Benchmark eBay: €{deal.benchmark_price.toFixed(2)}</span>
-              <span>Sconto stimato: {deal.discount_percent.toFixed(1)}%</span>
-              <span>Confidenza AI: {(deal.match_confidence * 100).toFixed(0)}%</span>
-              <span>Notificato: {deal.is_notified ? "Sì" : "No"}</span>
+        <div className="grid gap-4 sm:grid-cols-2">
+          {deals.map((deal) => (
+            <Card key={deal.id} className="flex flex-col gap-3">
+              <div className="flex items-start justify-between gap-2">
+                <h2 className="text-base font-semibold text-white">{deal.listing?.title || `Annuncio #${deal.listing_id}`}</h2>
+                <Badge tone={deal.is_notified ? "green" : "slate"}>{deal.is_notified ? "Notificato" : "Non notificato"}</Badge>
+              </div>
+
+              <div className="flex items-end gap-3">
+                <div>
+                  <div className="text-xs text-slate-400">Prezzo</div>
+                  <div className="text-2xl font-bold text-emerald-400">{formatEuro(deal.vinted_price)}</div>
+                </div>
+                <div className="pb-1 text-sm text-slate-400 line-through">{formatEuro(deal.benchmark_price)}</div>
+                <Badge tone="green">−{deal.discount_percent.toFixed(0)}%</Badge>
+              </div>
+
+              <div className="flex items-center justify-between text-xs text-slate-500">
+                <span>Media stesso prodotto: {formatEuro(deal.benchmark_price)}</span>
+                <span>{formatDateTime(deal.created_at)}</span>
+              </div>
+
               {deal.listing?.url ? (
-                <a href={deal.listing.url} target="_blank" rel="noreferrer" style={{ color: "#93c5fd" }}>
-                  Apri su Vinted
+                <a href={deal.listing.url} target="_blank" rel="noreferrer" className="btn-primary w-fit">
+                  Apri su Vinted ↗
                 </a>
               ) : null}
-            </div>
-          </article>
-        ))
+            </Card>
+          ))}
+        </div>
       )}
     </div>
   );

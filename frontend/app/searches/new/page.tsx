@@ -1,18 +1,22 @@
-import NewSearchForm from "@/app/components/new-search-form";
+import Link from "next/link";
+import { PageHeader, Card } from "@/app/components/ui";
+import SearchForm from "@/app/components/search-form";
 
 export default function NewSearchPage() {
   return (
-    <div style={{ display: "grid", gap: "1rem" }}>
-      <section>
-        <h1 style={{ marginTop: 0 }}>Nuova ricerca</h1>
-        <p style={{ color: "#94a3b8" }}>
-          Configura una ricerca monitorata su Vinted: il bot confrontera i prezzi e inviera alert se trova occasioni.
-        </p>
-      </section>
-
-      <section>
-        <NewSearchForm />
-      </section>
+    <div className="grid gap-6">
+      <PageHeader
+        title="Nuova ricerca"
+        subtitle="Configura una ricerca monitorata su Vinted. Il bot confronta i prezzi tra prodotti uguali e segnala le occasioni."
+        action={
+          <Link href="/searches" className="btn-ghost">
+            ← Tutte le ricerche
+          </Link>
+        }
+      />
+      <Card>
+        <SearchForm />
+      </Card>
     </div>
   );
 }

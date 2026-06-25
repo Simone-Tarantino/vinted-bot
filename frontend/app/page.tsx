@@ -1,20 +1,10 @@
+import Link from "next/link";
 import { getDeals, getHealth, getJobs, getListings, getSearches } from "@/lib/api";
+import { PageHeader, StatCard, Card, Badge, StatusBadge } from "@/app/components/ui";
+import { formatDateTime, formatDuration } from "@/lib/format";
+import ScanButton from "@/app/components/scan-button";
 
-function StatCard({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div
-      style={{
-        background: "#111827",
-        border: "1px solid #1f2937",
-        borderRadius: 12,
-        padding: "1rem",
-      }}
-    >
-      <div style={{ color: "#94a3b8", fontSize: 14 }}>{label}</div>
-      <div style={{ fontSize: 28, fontWeight: 700, marginTop: 4 }}>{value}</div>
-    </div>
-  );
-}
+export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
   const [health, searches, listings, deals, jobs] = await Promise.all([
@@ -29,52 +19,80 @@ export default async function DashboardPage() {
   const latestJob = jobs[0];
 
   return (
-    <div style={{ display: "grid", gap: "1.5rem" }}>
-      <section>
-        <h1 style={{ marginTop: 0 }}>Dashboard</h1>
-        <p style={{ color: "#94a3b8" }}>
-          Monitoraggio automatico Vinted con confronto prezzi eBay e matching AI Gemini.
-        </p>
-      </section>
+    <div className="grid gap-6">
+      <PageHeader
+        title="Dashboard"
+        subtitle="Monitoraggio annunci Vinted con confronto prezzi tra prodotti uguali (firma prodotto) e alert Telegram."
+        action={<ScanButton />}
+      />
 
-      <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "1rem" }}>
-        <StatCard label="Stato servizio" value={health.status} />
-        <StatCard label="Gemini configurato" value={health.gemini_configured ? "Sì" : "No"} />
-        <StatCard label="Ricerche attive" value={activeSearches} />
-        <StatCard label="Listing tracciati" value={listings.length} />
+      <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        <StatCard
+          label="Stato servizio"
+          value={<span className={health.status === "ok" ? "text-emerald-400" : "text-amber-400"}>{health.status}</span>}
+        />
+        <StatCard label="Gemini" value={health.gemini_configured ? "OK" : "Assente"} hint={health.gemini_configured ? undefined : "configura GEMINI_API_KEY"} />
+        <StatCard label="Ricerche attive" value={`${activeSearches}/${searches.length}`} />
+        <StatCard label="Annunci tracciati" value={listings.length} />
         <StatCard label="Deal trovati" value={deals.length} />
       </section>
 
-      <section style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
-        <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 12, padding: "1rem" }}>
-          <h2 style={{ marginTop: 0, fontSize: 18 }}>Ultimo job</h2>
+      <section className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-white">Ultima scansione</h2>
+            <Link href="/jobs" className="text-sm text-blue-400 hover:underline">
+              Storico →
+            </Link>
+          </div>
           {latestJob ? (
-            <ul style={{ paddingLeft: 18, margin: 0, color: "#cbd5e1" }}>
-              <li>Nome: {latestJob.job_name}</li>
-              <li>Stato: {latestJob.status}</li>
-              <li>Avviato: {new Date(latestJob.started_at).toLocaleString("it-IT")}</li>
-              <li>Dettagli: {latestJob.details || "-"}</li>
-            </ul>
+            <dl className="mt-3 grid gap-2 text-sm">
+              <div className="flex items-center justify-between">
+                <dt className="text-slate-400">Stato</dt>
+                <dd><StatusBadge status={latestJob.status} /></dd>
+              </div>
+              <div className="flex items-center justify-between">
+                <dt className="text-slate-400">Avviata</dt>
+                <dd className="text-slate-200">{formatDateTime(latestJob.started_at)}</dd>
+              </div>
+              <div className="flex items-center justify-between">
+                <dt className="text-slate-400">Durata</dt>
+                <dd className="text-slate-200">{formatDuration(latestJob.started_at, latestJob.finished_at)}</dd>
+              </div>
+              {latestJob.details ? (
+                <div className="mt-1 rounded-lg bg-slate-950 p-2 text-xs text-slate-400">{latestJob.details}</div>
+              ) : null}
+            </dl>
           ) : (
-            <p style={{ color: "#94a3b8" }}>Nessun job eseguito.</p>
+            <p className="mt-3 text-sm text-slate-400">Nessuna scansione eseguita. Usa “Avvia scansione ora”.</p>
           )}
-        </div>
+        </Card>
 
-        <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 12, padding: "1rem" }}>
-          <h2 style={{ marginTop: 0, fontSize: 18 }}>Ricerche monitorate</h2>
+        <Card>
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-white">Ricerche monitorate</h2>
+            <Link href="/searches" className="text-sm text-blue-400 hover:underline">
+              Gestisci →
+            </Link>
+          </div>
           {searches.length === 0 ? (
-            <p style={{ color: "#94a3b8" }}>Nessuna ricerca configurata.</p>
+            <p className="mt-3 text-sm text-slate-400">
+              Nessuna ricerca. <Link href="/searches" className="text-blue-400 hover:underline">Aggiungine una</Link>.
+            </p>
           ) : (
-            <ul style={{ paddingLeft: 18, margin: 0, color: "#cbd5e1" }}>
-              {searches.slice(0, 8).map((search) => (
-                <li key={search.id}>
-                  {search.query}
-                  {search.brand ? ` (${search.brand})` : ""} - soglia {search.discount_threshold_percent}%
+            <ul className="mt-3 grid gap-2">
+              {searches.slice(0, 6).map((search) => (
+                <li key={search.id} className="flex items-center justify-between gap-2 text-sm">
+                  <span className="truncate text-slate-200">
+                    {search.query}
+                    {search.brand ? <span className="text-slate-500"> · {search.brand}</span> : null}
+                  </span>
+                  <Badge tone={search.is_active ? "green" : "slate"}>{search.is_active ? "attiva" : "pausa"}</Badge>
                 </li>
               ))}
             </ul>
           )}
-        </div>
+        </Card>
       </section>
     </div>
   );
