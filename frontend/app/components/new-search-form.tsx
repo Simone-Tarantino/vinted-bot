@@ -3,8 +3,6 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 type FormState = {
   query: string;
   brand: string;
@@ -56,7 +54,7 @@ export default function NewSearchForm() {
 
     setIsSubmitting(true);
     try {
-      const response = await fetch(`${API_URL}/searches`, {
+      const response = await fetch("/api/searches", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
