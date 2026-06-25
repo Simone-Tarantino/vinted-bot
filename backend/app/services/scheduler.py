@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -6,6 +7,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
+from app.db.models import JobRun
 from app.services.scan_orchestrator import ScanOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,31 @@ class JobScheduler:
         self._scan_runner = scan_runner or self._default_scan_runner
         self.scheduler = BackgroundScheduler()
 
+    def _mark_stale_running_jobs(self, stale_minutes: int = 10) -> int:
+        db: Session = self.session_factory()
+        try:
+            cutoff = datetime.utcnow() - timedelta(minutes=stale_minutes)
+            stale_jobs = (
+                db.query(JobRun)
+                .filter(JobRun.status == "running", JobRun.started_at < cutoff)
+                .all()
+            )
+
+            if not stale_jobs:
+                return 0
+
+            now = datetime.utcnow()
+            for job in stale_jobs:
+                job.status = "failed"
+                job.finished_at = now
+                if not job.details:
+                    job.details = "Scan interrotto durante il riavvio del servizio."
+
+            db.commit()
+            return len(stale_jobs)
+        finally:
+            db.close()
+
     def _default_scan_runner(self) -> None:
         db: Session = self.session_factory()
         try:
@@ -35,6 +62,10 @@ class JobScheduler:
     def start(self) -> None:
         if self.scheduler.running:
             return
+
+        recovered = self._mark_stale_running_jobs()
+        if recovered:
+            logger.warning("Marked %s stale running jobs as failed", recovered)
 
         self.scheduler.add_job(
             self._scan_runner,
