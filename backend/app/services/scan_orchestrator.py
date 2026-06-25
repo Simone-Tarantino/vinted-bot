@@ -42,7 +42,9 @@ class ScanOrchestrator:
             session_file=self.settings.vinted_session_file,
         )
         self.vinted_worker = vinted_worker or VintedWorker(session_store=session_store)
-        self.ebay_comparator = ebay_comparator or EbayComparator()
+        self.ebay_comparator = ebay_comparator or EbayComparator(
+            enabled=self.settings.ebay_benchmark_enabled
+        )
 
         if ai_matcher is not None:
             self.ai_matcher = ai_matcher

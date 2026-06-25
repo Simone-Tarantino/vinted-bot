@@ -7,9 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from playwright.sync_api import Browser, Page, sync_playwright
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -181,15 +180,6 @@ class VintedWorker:
 
         return listings
 
-    @staticmethod
-    def _dismiss_consent(page: Page) -> None:
-        try:
-            page.click("#onetrust-accept-btn-handler", timeout=3000)
-        except PlaywrightTimeoutError:
-            pass
-        except Exception:  # noqa: BLE001 - consent banner is best-effort
-            pass
-
     def search(
         self,
         query: str,
@@ -201,34 +191,35 @@ class VintedWorker:
             return self.parse_listings_from_html(html_override)
 
         url = self.build_search_url(query, brand, max_price)
-        cookies = self.session_store.load_cookies()
 
-        with sync_playwright() as playwright:
-            browser: Browser = playwright.chromium.launch(
-                headless=self.headless, args=CHROMIUM_ARGS
+        # Vinted server-renders the catalog, so a plain HTTP GET returns the
+        # listings (each as an <a> with a descriptive `title`). This avoids
+        # launching Chromium, whose memory use crashed the container mid-scan.
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "it-IT,it;q=0.9",
+        }
+        cookie_jar = self._cookie_dict()
+
+        with httpx.Client(timeout=30.0, follow_redirects=True, headers=headers) as client:
+            response = client.get(url, cookies=cookie_jar)
+            response.raise_for_status()
+            html_content = response.text
+
+        listings = self.parse_listings_from_html(html_content)
+        if not listings:
+            logger.warning(
+                "No Vinted listings parsed for query=%r (status=%s, %s bytes)",
+                query,
+                response.status_code,
+                len(html_content),
             )
-            context = browser.new_context(locale="it-IT", user_agent=USER_AGENT)
-            try:
-                if cookies:
-                    context.add_cookies(cookies)
+        return listings
 
-                page = context.new_page()
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                self._dismiss_consent(page)
-
-                try:
-                    page.wait_for_selector('a[href*="/items/"]', timeout=20000)
-                except PlaywrightTimeoutError:
-                    logger.warning("No Vinted items rendered for query=%r", query)
-
-                html_content = page.content()
-
-                if cookies:
-                    self.session_store.save_cookies(context.cookies())
-            finally:
-                browser.close()
-
-        return self.parse_listings_from_html(html_content)
+    def _cookie_dict(self) -> dict[str, str]:
+        cookies = self.session_store.load_cookies() or []
+        return {c["name"]: c["value"] for c in cookies if "name" in c and "value" in c}
 
     def import_session_cookies(self, cookies: list[dict[str, Any]]) -> None:
         self.session_store.save_cookies(cookies)

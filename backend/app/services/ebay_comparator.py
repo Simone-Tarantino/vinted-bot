@@ -44,9 +44,11 @@ class EbayComparator:
     def __init__(
         self,
         headless: bool = True,
+        enabled: bool = True,
         fetch_fn: Optional[Callable[[str], list[dict]]] = None,
     ):
         self._headless = headless
+        self._enabled = enabled
         # Injectable for tests; otherwise a Playwright browser fetch is used.
         self._fetch_fn = fetch_fn
 
@@ -78,6 +80,17 @@ class EbayComparator:
             context = browser.new_context(locale="it-IT", user_agent=USER_AGENT)
             try:
                 page = context.new_page()
+                # Drop images/media/fonts: we only need the result text, and this
+                # keeps Chromium's memory footprint small on tiny hosts. Stylesheets
+                # are kept because blocking them stops eBay rendering the results.
+                page.route(
+                    "**/*",
+                    lambda route: (
+                        route.abort()
+                        if route.request.resource_type in {"image", "media", "font"}
+                        else route.continue_()
+                    ),
+                )
                 # Warm up cookies on the homepage first; hitting the search URL
                 # cold gets a 403 from eBay's edge protection.
                 page.goto(self.EBAY_BASE, wait_until="domcontentloaded", timeout=60000)
@@ -92,6 +105,8 @@ class EbayComparator:
                 browser.close()
 
     def fetch_benchmark(self, query: str, brand: Optional[str] = None) -> Optional[EbayBenchmark]:
+        if not self._enabled:
+            return None
         url = self.build_search_url(query, brand)
         fetch = self._fetch_fn or self._fetch_entries
         try:
