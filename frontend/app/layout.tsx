@@ -13,6 +13,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <nav style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
             <strong style={{ fontSize: "1.1rem" }}>Vinted Deal Agent</strong>
             <a href="/" style={{ color: "#93c5fd" }}>Dashboard</a>
+            <a href="/searches/new" style={{ color: "#93c5fd" }}>Nuova ricerca</a>
             <a href="/deals" style={{ color: "#93c5fd" }}>Deals</a>
           </nav>
         </header>
